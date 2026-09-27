@@ -1,0 +1,262 @@
+---
+title: "Tutorial: Intro to Multi-level Modeling (MLM) Analysis in R"
+author: Sierra Corbin, M.A.
+output: 
+  html_document:
+    toc: TRUE
+    toc_float: TRUE
+    toc_collapsed: TRUE
+    number_sections: true  
+    theme: cerulean 
+editor_options: 
+  chunk_output_type: console
+---
+# Load in Required Packages
+
+```{r load packages}
+pacman::p_load(car,Hmisc,ppcor,psych,MASS, mctest, fBasics, foreign, jtools, lmerTest, lme4, tidyverse, dplyr, ggplot2, data.table, cowplot, performance) #loading in necessary packages (tools) for data analyses
+```
+
+# Data Criteria & Simulation
+
+## Let's review what our data should do
+
+Simulate a hypothetical dataset to examine <span style="color: darkorchid;">***L~mean~***</span> as predicted by a <span style="color: darkorchid;">***movePhase fixed effect***</span>, and <span style="color: darkorchid;"> ***part_ID random intercepts and slopes effects***</span>.
+
+- **Dependent Variable**: <span style="color: darkorchid;">***L~mean~***</span>, or the average CRQA line length per trial for intrapersonal hand-torso coupling during horizontal pointer movement trials. *Mean line length* is a measure of the predictability/stability of the coordination, with higher values indicating longer average periods of hand-torso coupling.
+- **Independent Variable** (fixed effect): <span style="color: darkorchid;">***movePhase fixed effect***</span>, or the participant's instructed pointer movement phase; relative to the on-screen target being tracked per trial.
+  a. Avoid/anti-phase
+  b. Approach/in-phase
+- *N~participants~* = 50
+- Within-Subjects Repeated Measures: 6 trials per condition (12 trials per participant)
+- *N~total.trials~* = 600
+
+Therefore, the final model is expected to be:
+$$ Y_{ij} = (b_0 + u_{0j}) + (b_1 + u_{1j}) * X_{ij} + residual_{error} $$
+
+... or (more specifically: 
+$$ Lmean = (Intercept + randIntEff) + (Slope + randSlopeEff) * movePhase + residual_{error} $$
+... which corresponds to the following final lmer model: 
+`Lmean ~ movePhase + (movePhase|part_ID)`.
+
+## A Few Key Terms
+
+- <span style="color: darkorchid;">***Hierarchical Analysis***</span>: describes the relationships that exist within and between the levels of nested data within the model; such analyses acknowledge the interdependence of nested data, considering fixed and random effects at both the individual and group-levels of interpretation. 
+- <span style="color: darkorchid;">***Fixed Effect***</span>: observations/measurements at the group-level of analysis; these sample estimates reflect the differences between groups (i.e.: regression main effects and interaction terms) while disregarding the additional context provided in the hierarchy.
+- <span style="color: darkorchid;">***Random Effect***</span>: allow the regression coefficients to vary across groups, giving the model additional predictive flexibility in the resulting intercepts and slopes. 
+  
+  a. ***Random Intercepts***: assume that the intercept values for the model vary significantly with respect to individual (or lower level) observations, rather than expecting all individual relations to converge to a single intercept value; employing random intercepts, then, takes some of the onus off the fixed effect to account for such individual differences.
+  b. ***Random Slopes***: allow the lower-level observations to vary in relational strength with respect to the association between the predictors and outcome variables; for some lower-level observations, the effect of the predictor will be stronger/weaker than for others.
+  
+Now that we have a conceptual basis for MLMs, let's make some data!
+
+## Simulating the dataset:
+### First, let's set some of the fixed effect paramerters
+```{r Creating the fixed parameters}
+Lmean_grandM <- 125 #chosen (grand) mean for the entire dataset
+n_participant <- 50 #number of participants
+eff.size_mP <- .707 #pearson's r for a chosen cohen's d of 2 (large eff. size)
+tot_trials <- 600 #number of overall trials
+```
+
+### Now we must partition the random effects and residual error variance
+```{r Partitioning the random and error variance}
+residual_variance <- 1 - eff.size_mP^2 #variance left after including condition fixed effect
+residual_sd <- sqrt(residual_variance) #SD of the residual variance after condition effect
+```
+
+### Randomly generating the intercept and slope effects, partitioning variance (cont'd)
+```{r Randomly generating the intercept and slope effects, partitioning variance cont}
+set.seed(1) #setting seed insures reproducibility of intercept effect outputs
+intvar_bypart <- .30 #arbitrarily chosen intercept variance value; this will help calculate the random intercept values that will be used to account for differences by participant. 
+intsd_bypart <- sqrt(intvar_bypart) #corresponding SD for random intercepts
+per_part_int <- rnorm(n_participant, 0, intsd_bypart) #rnorm function used to simulate 50 random participant intercept adjustment values
+
+residual_variance2 <- residual_variance-intvar_bypart #variance left to be claimed after allocation for random intercepts
+residual_sd2 <- sqrt(residual_variance2) #SD of the residual variance after random intercepts effect
+
+set.seed(2) #setting seed insures reproducibility of slope effect outputs
+slope_eff <- sqrt(.15) #chosen value corresponding to SD for random slopes (.15 of .20 left variance); this will help calculate the random slope values that will be used to account for differences by participant.
+per_part_slope <- rnorm(n_participant,0,slope_eff) #rnorm function used to simulate 50 random participant slope adjustment values
+```
+
+### Building the data frame
+```{r Building a workable data structure}
+#bringing our participant-level data together:
+partData <- data.frame(part_ID = as.factor(1:n_participant), #create 50 participant IDs 
+                       per_part_int, #adds random intercept adjustment for each
+                       per_part_slope) #add random slope adjustment for each
+```
+
+### Randomly generating the residual variance
+```{r Randomly generating the residual effects}
+
+set.seed(3) #setting seed insures reproducibility of residual effect outputs
+resid_eff <- residual_sd2 - slope_eff
+resids <- rnorm(tot_trials, 0, resid_eff)
+```
+
+### Bringing the final data frame together with resulting Lmean values
+```{r Finish building the data frame, calc Lmeans}
+participant_id = as.factor(rep(1:n_participant, each = 12)) #extending part_ID for all 600 trials 
+
+#bringing our trial-level data together:
+trialData <- data.frame(part_ID = participant_id, #including all participant IDs for the 600 trials
+                        trial = as_factor(1:12), #including the within-subjects trial count
+                        movePhase = 1:2, #Movement condition for each trial: 1 = Avoid, 2 = Approach
+                        Phase = as_factor(c("Avoid", "Approach")), #categorical copy of movePhase for labeling/visualizing data
+                        resids) #residual error as calculated above
+
+#joining trial-level and participant-level data:
+condData <- left_join(trialData, partData) 
+```
+
+Now we can produce some <span style="color: darkorchid;">***L~mean~***</span> values that will reflect the model we are after:
+
+$$ Lmean = (Intercept + randIntEff) + (Slope + randSlopeEff) * movePhase + residual_{error} $$
+
+### Checking the final data frame and descriptives by condition
+```{r The data frame has arrived}
+#Final, workable data frame:
+tutData = within(condData, { Lmean = (Lmean_grandM + per_part_int) + (eff.size_mP + per_part_slope) * movePhase + resids
+})
+
+#Taking a quick look at the data:
+head(tutData) #Looks good! 
+summary(tutData) # :)
+
+describeBy(tutData$Lmean, group = tutData$movePhase) #looking at the data descriptives by condition of movePhase; doesn't look like we have any issues, but lack of normality in individual variables wouldn't be a problem necessarily.
+genBP <- plot(tutData$part_ID, tutData$Lmean, xlab = "Participant ID", ylab = "Lmean", pch = 20, col = "deepskyblue",
+     main = " Boxplots of Mean Line Length by Participant") #quick visualization of participant boxplots for Lmeans
+
+tutData_1 <- filter(tutData, movePhase == 1) #filtering out only avoid condition trials to generate separate plot
+genBP_1 <- plot(tutData_1$part_ID, tutData_1$Lmean, xlab = "Participant ID", ylab = "Lmean", pch = 20, col = "deepskyblue",
+     main = " Boxplots of Mean Line Length by Participant: Avoid Only") #quick visualization of participant boxplots for Avoid condition Lmeans
+
+tutData_2 <- filter(tutData, movePhase == 2) #filtering out only approach condition trials to generate separate plot
+genBP_2 <- plot(tutData_2$part_ID, tutData_2$Lmean, xlab = "Participant ID", ylab = "Lmean", pch = 20, col = "deepskyblue",
+     main = " Boxplots of Mean Line Length by Participant: Approach Only") #quick visualization of participant boxplots for Approach condition Lmeans
+```
+
+Now, we need to build our models:
+
+- **Base** (random intercept-only): `Lmean ~ (1|part_ID)`
+- **Primary** (fixed + random ints effects added): `Lmean ~ movePhase + (1|part_ID)`
+- **Random Effects** (fixed + random ints/slopes): `Lmean ~ movePhase + (movePhase|part_ID)`
+
+In the context of this dataset:
+
+- **Varying intercepts**, if significant, indicate that the *intercept* value (unstandardized beta), which represents the predicted value of <span style="color: darkorchid;">***L~mean~***</span> for all participants' trials before taking into account the condition information (or the grand mean), varies randomly with respect to the participant, with some participants having higher or lower values thereof. As a result, the model is improved (better predictive precision) by allowing the intercepts to be randomly distributed with respect to <span style="color: darkorchid;">***part_ID***</span>.
+- **Varying slopes**, if significant, indicate that the *slope* value (unstandardized beta), which represents the strength of the relationship between the <span style="color: darkorchid;">***movePhase***</span> condition and resulting value of <span style="color: darkorchid;">***L~mean~***</span>, is moderated with respect to <span style="color: darkorchid;">***part_ID***</span>.
+
+# Building the Multi-level Models
+
+## Create models for model-based assumptions tests
+```{r Making the models}
+base_model <- lmer(Lmean ~ (1|part_ID), tutData %>% arrange(part_ID)) #random intercepts only added to see if model needs them
+primary_model <- lmer(Lmean ~ movePhase + (1|part_ID),data=tutData) #let's add the movePhase fixed effect
+random_effects_model <- lmer(Lmean ~ movePhase + (movePhase|part_ID), data = tutData) #finally adding the random slope effect
+```
+
+We will evaluate the significance of each of these later, but for now, let's check some assumptions:
+
+## Assumptions Tests
+
+### For the overall residuals, intercepts, and slopes
+
+#### Normality of residuals, random intercepts, and random slopes for model
+```{r Assumptions, Normality of random intercepts and slopes}
+describe(tutData$resids) #overall residuals; skew and kurtosis look good here
+#first the intercepts:
+describe(tutData$per_part_int) #skew and kurtosos look good here
+hist(per_part_int) #skew acceptable according to total n size
+
+#then the slopes
+describe(tutData$per_part_slope) #skew and kurtosis look good here, too
+hist(per_part_slope) #kurtosis acceptable according to total n size
+```
+
+Everything above looks good (acceptable skew/kurtosis/distribution of residuals, random intercepts, and random slopes), so let's move on to the models!
+
+### First, let's examine the base model
+
+#### Normality of errors for model
+```{r Base Model Error}
+plot(base_model) #residuals vs. fitted plot looks concerning
+car::qqPlot(resid(base_model)) #qq plot could be better fit, too
+```
+
+- The residuals vs. fitteds plot indicates a **fanning** effect (residuals systematically diverge from zero as <span style="color: darkorchid;">***L~mean~***</span> values increase) indicating a clear violation of ***homoscedasticity*** (see documentation for further explanation).
+- The QQ plot indicates that data is insufficiently fitted with respect to a model of only the random intercepts, as indicated by the ***non-normal***, s-shaped distribution of the model's plotted values. More specification seems necessary, so we'll see what the subsequent models offer.
+
+### Now, let's examine the primary model
+
+#### Normality of errors for model
+```{r Primary Model Error}
+plot(primary_model) # this residuals vs. fitted plot looks less concerning, but there's still room for improvement
+car::qqPlot(resid(primary_model)) #qq plot could still be improved
+```
+
+- Here, the residuals vs. fitteds plot looks *somewhat* better but we do still see a spreading of the error variance at the extremes of the data. The addition of the <span style="color: darkorchid;">***movePhase***</span> fixed effect seems to improve the model, but not completely.
+- The QQ plot has also improved, but we do still see some deviation from normal for extreme values. More specification might offer further benefits, so let's look at the random intercepts + slopes model.
+
+### Finally, let's examine the random effect (ints + slopes) model's assumptions
+
+#### Normality of errors for model
+```{r Random Ints and Slopes Model Error}
+plot(random_effects_model) # these residuals look the best in terms of equal variance around zero
+car::qqPlot(resid(random_effects_model)) #this QQ plot looks good
+```
+
+- The residuals vs. fitteds plot shows marked improvement, with most of the residuals being evenly and randomly distributed around zero (note the general coherence to a horizontal band around the 0 line). It looks like including the random effects further improves the initial (base_model's) violations of ***homoscedasticity***.
+- The QQ plot also shows further improvements, with most points fitting along the line of normality (or within the 95% confidence interval). 
+- We can see the gradual improvements that seem to be afforded once we further specify the model, but are these additional models *actually* ***statistically*** *significant*? And which model is the ***ideal***?
+
+## Testing the MLMs
+
+### The Base Model (random intercepts only)
+```{r Testing the Base Model}
+summary(base_model) #significance of model
+ranova(base_model) #significance of random effects
+confint(base_model) #Estimate lower and upper confidence intervals 
+```
+
+- Regarding the **Base** model, in which <span style="color: darkorchid;">***L~mean~***</span> is predicted by only the random intercepts, we see a significant <span style="color: darkorchid;">***part_ID***</span> random effect, *AIC* = 1,620.98, *p* < .001. 
+- **Varying intercepts** indicate that the *intercept* value for participants' trials before taking into account the condition information varies randomly with respect to the participant, with some participants having higher or lower values thereof. As a result, the model is improved (better predictive precision) by allowing the intercepts to be randomly distributed with respect to <span style="color: darkorchid;">***part_ID***</span>.
+- Still, for the reasons addressed during assumptions, and to investigate the fixed effect of <span style="color: darkorchid;">***movePhase***</span>, we will continue.
+
+### The Primary Model (fixed condition effect + random intercepts)
+```{r Testing the Primary model}
+summary(primary_model) #significance of model
+ranova(primary_model) #significance of random effects
+confint(primary_model) #Estimate lower and upper confidence intervals 
+describeBy(tutData$Lmean, group = tutData$movePhase) #looking at the data descriptives by condition of movePhase
+```
+
+- Regarding the **Primary** model, in which <span style="color: darkorchid;">***L~mean~***</span> is predicted by a fixed effect of <span style="color: darkorchid;">***movePhase***</span> and a random intercepts effect, there was a significant effect of <span style="color: darkorchid;">***movePhase***</span>, *b* = 0.73 (*SE* = .02), *t*(549) = 38.19, *p* < .001. This indicates that, for those in the Avoid condition, <span style="color: darkorchid;">***L~mean~***</span> values were significantly lower than those in the Approach condition.
+
+### The Random Effects Model (fixed condition effect + random intercepts and slopes)
+```{r Testing the Slopes model}
+summary(random_effects_model) #significance of model
+ranova(random_effects_model) #significance of random effects
+confint(random_effects_model) #Estimate lower and upper confidence intervals 
+```
+
+- Regarding the **Random effects** model, in which <span style="color: darkorchid;">***L~mean~***</span> is predicted by a fixed effect of <span style="color: darkorchid;">***movePhase***</span> and random slope and intercept effects of <span style="color: darkorchid;">***part_ID***</span>, there was a significant effect of adding the random <span style="color: darkorchid;">***part_ID***</span> slope effect on <span style="color: darkorchid;">***movePhase***</span> (in addition to the random <span style="color: darkorchid;">***part_ID***</span> intercept), *AIC* = 226.10, *p* < .001.
+- Further, **varying slopes** indicate that the fixed effect of <span style="color: darkorchid;">***movePhase***</span> is moderated with respect to <span style="color: darkorchid;">***part_ID***</span>, with the condition having stronger effects on <span style="color: darkorchid;">***L~mean~***</span> values for some, and weaker effects for others. This is in addition to the <span style="color: darkorchid;">***part_ID***</span> random intercept effect. 
+
+### The FINAL Model Check: Atheoretical Stepwise Analysis
+```{r Bonus check: Running a Stepwise}
+full_model <- random_effects_model #assign model with all effects of interest (random and fixed) to see what Stepwise deems necessary
+step_model <- lmerTest::step(full_model)#stepwise function takes the full model and decides which effects to keep and drop to best account for model variance
+final_model <- step_model %>% get_model() #which is the best?
+summary(final_model) #looks like the slopes model wins!
+```
+
+Since stepwise regression analyses can be used to atheoretically fit an optimal model to a dataset, I decided to load in the slopes model (which contains all fixed and random effects of interest) into the step model test; results correspond with those of the MLM analysis, with the most optimal model being that of the slopes model, <span style="color: darkorchid;">**Random Effects**</span> (fixed + random ints/slopes): `Lmean ~ movePhase + (movePhase|part_ID)`.
+
+That's all folks! :)
+  
+
+
+
